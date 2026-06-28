@@ -114,8 +114,26 @@ def generate_docx(
     else:
         sections = _decode_sections(sections, sections_json_b64, sections_b64gz)
     doc = Document()
-    doc.styles["Normal"].font.name = "Arial"
+
+    # CJK font handling for DOCX — font.name only sets western (w:ascii),
+    # CJK chars need w:eastAsia set via low-level XML.
+    _FONT_NAME = "Arial"
+    if _CJK_FONT:
+        _FONT_NAME = "微软雅黑" if "msyh" in _CJK_FONT.lower() else "SimSun"
+    doc.styles["Normal"].font.name = _FONT_NAME
     doc.styles["Normal"].font.size = Pt(11)
+    # Set east-asia font on the style's underlying XML
+    _FONT_EAST = _FONT_NAME if _CJK_FONT else ""
+    if _FONT_EAST:
+        from docx.oxml.ns import qn
+        rPr = doc.styles["Normal"].element.get_or_add_rPr()
+        rFonts = rPr.find(qn("w:rFonts"))
+        if rFonts is None:
+            from lxml import etree
+            rFonts = etree.SubElement(rPr, qn("w:rFonts"))
+        rFonts.set(qn("w:eastAsia"), _FONT_EAST)
+        rFonts.set(qn("w:ascii"), _FONT_NAME)
+        rFonts.set(qn("w:hAnsi"), _FONT_NAME)
 
     if title:
         p = doc.add_heading(title, level=0)
