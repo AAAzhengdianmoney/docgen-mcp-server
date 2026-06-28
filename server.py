@@ -115,36 +115,71 @@ def generate_docx(
         sections = _decode_sections(sections, sections_json_b64, sections_b64gz)
     doc = Document()
 
-    # CJK font handling for DOCX — font.name only sets western (w:ascii),
-    # CJK chars need w:eastAsia set via low-level XML.
-    _FONT_NAME = "Arial"
+    # CJK font handling — Normal style gets a CJK font, Headings get SimHei (黑体) or fallback.
+    # font.name only sets western (w:ascii); CJK chars need w:eastAsia via XML.
+    _DEFAULT_FONT = "Arial"
+    _HEADING_FONT = "Arial"
     if _CJK_FONT:
-        _FONT_NAME = "微软雅黑" if "msyh" in _CJK_FONT.lower() else "SimSun"
-    doc.styles["Normal"].font.name = _FONT_NAME
-    doc.styles["Normal"].font.size = Pt(11)
-    # Set east-asia font on the style's underlying XML
-    _FONT_EAST = _FONT_NAME if _CJK_FONT else ""
-    if _FONT_EAST:
+        _DEFAULT_FONT = "微软雅黑" if "msyh" in _CJK_FONT.lower() else "SimSun"
+        # SimHei (黑体) on Windows; PingFang SC Bold / Noto Sans CJK on others
+        if Path("C:/Windows/Fonts/simhei.ttf").exists():
+            _HEADING_FONT = "SimHei"
+        elif Path("/System/Library/Fonts/PingFang.ttc").exists():
+            _HEADING_FONT = "PingFang SC"  # macOS system bold CJK
+        elif Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc").exists():
+            _HEADING_FONT = "WenQuanYi Micro Hei"
+        else:
+            _HEADING_FONT = _DEFAULT_FONT  # fallback
+
+    def _set_cjk_font(style, font_name):
+        """Set both western and east-asia font on a style via XML."""
+        style.font.name = font_name
         from docx.oxml.ns import qn
-        rPr = doc.styles["Normal"].element.get_or_add_rPr()
+        rPr = style.element.get_or_add_rPr()
         rFonts = rPr.find(qn("w:rFonts"))
         if rFonts is None:
             from lxml import etree
             rFonts = etree.SubElement(rPr, qn("w:rFonts"))
-        rFonts.set(qn("w:eastAsia"), _FONT_EAST)
-        rFonts.set(qn("w:ascii"), _FONT_NAME)
-        rFonts.set(qn("w:hAnsi"), _FONT_NAME)
+        rFonts.set(qn("w:eastAsia"), font_name)
+        rFonts.set(qn("w:ascii"), font_name)
+        rFonts.set(qn("w:hAnsi"), font_name)
+
+    doc.styles["Normal"].font.size = Pt(11)
+    _set_cjk_font(doc.styles["Normal"], _DEFAULT_FONT)
 
     if title:
         p = doc.add_heading(title, level=0)
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        # Apply heading font to title too
+        for run in p.runs:
+            run.font.name = _HEADING_FONT
+            from docx.oxml.ns import qn
+            rPr = run._r.get_or_add_rPr()
+            rFonts = rPr.find(qn("w:rFonts"))
+            if rFonts is None:
+                from lxml import etree
+                rFonts = etree.SubElement(rPr, qn("w:rFonts"))
+            rFonts.set(qn("w:eastAsia"), _HEADING_FONT)
+            rFonts.set(qn("w:ascii"), _HEADING_FONT)
+            rFonts.set(qn("w:hAnsi"), _HEADING_FONT)
 
     for s in sections:
         heading = s.get("heading", "")
         body = s.get("body", "")
         sn = s.get("style", "normal")
         if heading:
-            doc.add_heading(heading, level=1)
+            h = doc.add_heading(heading, level=1)
+            for run in h.runs:
+                run.font.name = _HEADING_FONT
+                from docx.oxml.ns import qn
+                rPr = run._r.get_or_add_rPr()
+                rFonts = rPr.find(qn("w:rFonts"))
+                if rFonts is None:
+                    from lxml import etree
+                    rFonts = etree.SubElement(rPr, qn("w:rFonts"))
+                rFonts.set(qn("w:eastAsia"), _HEADING_FONT)
+                rFonts.set(qn("w:ascii"), _HEADING_FONT)
+                rFonts.set(qn("w:hAnsi"), _HEADING_FONT)
         if not body:
             continue
         if sn == "bullet":
