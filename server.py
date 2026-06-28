@@ -445,13 +445,11 @@ class _PDF(FPDF):
         self.cell(0, 10, self._header_text, align="C", new_x="LMARGIN", new_y="NEXT")
 
     def footer(self):
-        if self._hf_key:
-            self.set_font(self._hf_key, "", 8)
-        else:
-            self.set_font("Helvetica", "", 8)
-        self.set_y(-15)
+        # Position 15mm from bottom edge
+        self.set_y(-18)
+        self.set_font("Helvetica", "", 8)
         if self._footer_text:
-            self.cell(0, 10, self._footer_text + f"  |  Page {self.page_no()}/{{nb}}", align="C")
+            self.cell(0, 10, f"{self._footer_text}  |  Page {self.page_no()}/{{nb}}", align="C")
         else:
             self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", align="C")
 
@@ -681,7 +679,7 @@ def generate_pdf(
 
     pdf = _PDF(header_text=header_text, footer_text=footer_text)
     pdf.alias_nb_pages()
-    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.set_auto_page_break(auto=True, margin=25)
     pdf.add_page()
 
     if title:
