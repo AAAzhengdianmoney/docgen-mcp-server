@@ -19,6 +19,8 @@ from pathlib import Path
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt
+from docx.shared import RGBColor
+from docx.shared import Inches
 from fpdf import FPDF
 from fpdf.enums import WrapMode
 from mcp.server.fastmcp import FastMCP
@@ -217,11 +219,13 @@ def _set_run_font(run, font_name: str):
 
 
 def _make_docx_body_paragraph(doc, body: str, font_name: str):
-    """Add a body paragraph with a specific font."""
-    p = doc.add_paragraph(body)
-    for run in p.runs:
-        _set_run_font(run, font_name)
-    return p
+    """Add body paragraphs with a specific font. Multi-line text → multiple paragraphs."""
+    for line in body.strip().split("\n"):
+        text = line.strip()
+        if text:
+            p = doc.add_paragraph(text)
+            for run in p.runs:
+                _set_run_font(run, font_name)
 
 
 def _make_docx_bullet(doc, body: str, font_name: str):
@@ -240,6 +244,74 @@ def _make_docx_numbered(doc, body: str, font_name: str):
             p = doc.add_paragraph(line.strip(), style="List Number")
             for run in p.runs:
                 _set_run_font(run, font_name)
+
+
+# ── Rich text (markdown-like inline formatting) ──
+
+import re
+
+_MD_PAT = re.compile(r"(\*\*(.+?)\*\*|\*(.+?)\*)")
+
+def _parse_markdown_spans(text: str) -> list[dict]:
+    """Parse **bold** and *italic* spans. Returns [{"text": ..., "bold": bool, "italic": bool}]."""
+    spans = []
+    pos = 0
+    for m in _MD_PAT.finditer(text):
+        if m.start() > pos:
+            spans.append({"text": text[pos:m.start()], "bold": False, "italic": False})
+        if m.group(2):  # **...**
+            spans.append({"text": m.group(2), "bold": True, "italic": False})
+        else:           # *...*
+            spans.append({"text": m.group(3), "bold": False, "italic": True})
+        pos = m.end()
+    if pos < len(text):
+        spans.append({"text": text[pos:], "bold": False, "italic": False})
+    return spans
+
+
+def _make_docx_rich_paragraph(doc, body: str, font_name: str):
+    """Add body paragraphs with **bold** / *italic* inline formatting. Multi-line."""
+    for line in body.strip().split("\n"):
+        text = line.strip()
+        if not text:
+            continue
+        p = doc.add_paragraph()
+        for span in _parse_markdown_spans(text):
+            run = p.add_run(span["text"])
+            run.bold = span["bold"]
+            if span["italic"]:
+                run.underline = True  # CJK fonts have no italic glyphs; underline instead
+            _set_run_font(run, font_name)
+
+
+# ── Table ──
+
+def _make_docx_table(doc, table_def: dict, font_name: str):
+    """Add a styled table with CJK font support."""
+    headers = table_def.get("headers", [])
+    rows = table_def.get("rows", [])
+    if not headers and not rows:
+        return
+
+    ncols = len(headers) or (len(rows[0]) if rows else 1)
+    table = doc.add_table(rows=1 + len(rows), cols=ncols, style="Table Grid")
+
+    def _fill_cell(cell, text: str):
+        cell.text = ""
+        p = cell.paragraphs[0]
+        run = p.add_run(str(text))
+        _set_run_font(run, font_name)
+
+    # Header row
+    for i, h in enumerate(headers):
+        _fill_cell(table.rows[0].cells[i], h)
+    # Data rows
+    for ri, row in enumerate(rows):
+        for ci, val in enumerate(row):
+            _fill_cell(table.rows[ri + 1].cells[ci], val)
+
+    # Add a blank paragraph after the table for spacing
+    doc.add_paragraph()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -293,11 +365,71 @@ def _pdf_write_text(pdf: FPDF, text: str, font_display: str, size: int,
             pdf.cell(bw, size * 0.55, ln, new_x="LMARGIN", new_y="NEXT")
 
 
+def _pdf_write_table(pdf: FPDF, table_def: dict, font_display: str):
+    """Draw a table with CJK font in PDF."""
+    headers = table_def.get("headers", [])
+    rows = table_def.get("rows", [])
+    if not headers and not rows:
+        return
+
+    ncols = len(headers) or (len(rows[0]) if rows else 1)
+    col_w = (pdf.w - pdf.l_margin - pdf.r_margin) / ncols
+    line_h = 7
+    font_size = 9
+
+    if _ANY_CJK:
+        key = _ensure_pdf_font(pdf, font_display)
+
+    def _cell(text: str, w: float, bold: bool = False):
+        if _ANY_CJK:
+            pdf.set_font(key, "", font_size)
+        else:
+            pdf.set_font("Helvetica", "B" if bold else "", font_size)
+        pdf.cell(w, line_h, str(text), border=1, align="C")
+
+    # Header row
+    for h in headers:
+        _cell(h, col_w, bold=True)
+    pdf.ln(line_h)
+
+    # Data rows
+    for row in rows:
+        for ci, val in enumerate(row):
+            _cell(val, col_w)
+        pdf.ln(line_h)
+    pdf.ln(4)
+
+
 class _PDF(FPDF):
+    def __init__(self, header_text: str = "", footer_text: str = ""):
+        super().__init__()
+        self._header_text = header_text
+        self._footer_text = footer_text
+        # Register a CJK font for header/footer text
+        self._hf_key = None
+        if _ANY_CJK and _DEFAULT_BODY_PATH:
+            self._hf_key = "hf0"
+            self.add_font(self._hf_key, "", _DEFAULT_BODY_PATH)
+
+    def header(self):
+        if not self._header_text:
+            return
+        if self._hf_key:
+            self.set_font(self._hf_key, "", 8)
+        else:
+            self.set_font("Helvetica", "", 8)
+        self.cell(0, 10, self._header_text, align="C", new_x="LMARGIN", new_y="NEXT")
+
     def footer(self):
+        if self._hf_key:
+            self.set_font(self._hf_key, "", 8)
+        else:
+            self.set_font("Helvetica", "", 8)
         self.set_y(-15)
-        self.set_font("Helvetica", "", 8)
-        self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", align="C")
+        if self._footer_text:
+            self.cell(0, 10, self._footer_text + f"  |  Page {self.page_no()}/{{nb}}", align="C")
+        else:
+            self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", align="C")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -345,6 +477,8 @@ def generate_docx(
     sections: list[dict] = [],
     title_font: str = "",
     heading_font: str = "",
+    header_text: str = "",
+    footer_text: str = "",
     sections_json_b64: str = "",
     sections_b64gz: str = "",
     sections_file: str = "",
@@ -357,23 +491,28 @@ def generate_docx(
         title_font: Font for the main title (default: Hei/SimHei).
         heading_font: Default font for all section headings (default: Hei/SimHei).
             Individual sections can override with their own heading_font.
+        header_text: Optional page header text.
+        footer_text: Optional page footer text (appended before page number).
         sections: List of section dicts (ASCII-safe only, for short content).
         sections_file: Path to a JSON file on disk containing the sections array.
                       BEST for CJK/large content — avoids MCP argument serialization bugs.
         sections_json_b64: Base64-encoded JSON of sections array (legacy).
         sections_b64gz: gzip-compressed + base64-encoded sections JSON (legacy).
         sections[].heading: Section heading.
-        sections[].body: Section body text.
-        sections[].style: "normal" (default), "bullet", or "numbered".
+        sections[].body: Section body text. Supports **bold** and *italic* inline.
+        sections[].style: "normal" (default), "bullet", "numbered", "table", "divider", "image".
+        sections[].level: Heading level 1/2/3 (default: 1).
         sections[].font: Font for body text in this section (default: 微软雅黑/MS YaHei).
             Use list_fonts() to see available fonts. Aliases like "kai", "fang", "hei" work.
         sections[].heading_font: Font for this section's heading (default: 黑体/SimHei).
+        sections[].table: {"headers": [...], "rows": [[...], ...]} for table style.
+        sections[].image: Path to an image file (local) for image style.
+        sections[].image_width: Image width in mm (optional, for image style).
     """
     sections = _decode_sections(sections, sections_json_b64, sections_b64gz, sections_file)
 
     # Resolve global heading font
     global_heading = _resolve_font(heading_font) or _DEFAULT_HEADING_NAME
-    # Resolve title font
     tfont = _resolve_font(title_font) or global_heading
 
     doc = Document()
@@ -381,6 +520,20 @@ def generate_docx(
     # ── Normal style defaults ──
     doc.styles["Normal"].font.size = Pt(11)
     _set_docx_font(doc.styles["Normal"], _DEFAULT_BODY_NAME)
+
+    # ── Header / Footer ──
+    if header_text:
+        h = doc.sections[0].header
+        h.paragraphs[0].clear()
+        run = h.paragraphs[0].add_run(header_text)
+        run.font.size = Pt(8)
+        h.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    if footer_text:
+        f = doc.sections[0].footer
+        f.paragraphs[0].clear()
+        run = f.paragraphs[0].add_run(footer_text)
+        run.font.size = Pt(8)
+        f.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     # ── Title ──
     if title:
@@ -394,25 +547,56 @@ def generate_docx(
         heading = s.get("heading", "")
         body = s.get("body", "")
         sn = s.get("style", "normal")
+        level = s.get("level", 1)
 
         # Per-section font overrides
         body_font = _resolve_font(s.get("font")) or _DEFAULT_BODY_NAME
         sec_heading_font = _resolve_font(s.get("heading_font")) or global_heading
+        table_font = _resolve_font(s.get("table_font")) or body_font
 
+        # ── Divider ──
+        if sn == "divider":
+            p = doc.add_paragraph("─" * 50)
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            for run in p.runs:
+                run.font.color.rgb = RGBColor(0xAA, 0xAA, 0xAA)
+            continue
+
+        # ── Image ──
+        if sn == "image":
+            img_path = s.get("image", "")
+            if img_path and Path(img_path).exists():
+                w = s.get("image_width")
+                kw = {"width": Inches(w / 25.4)} if w else {}
+                p = doc.add_paragraph()
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                run = p.add_run()
+                run.add_picture(img_path, **kw)
+            continue
+
+        # ── Heading (with level) ──
         if heading:
-            h = doc.add_heading(heading, level=1)
+            h = doc.add_heading(heading, level=level)
             for run in h.runs:
                 _set_run_font(run, sec_heading_font)
 
-        if not body:
+        if not body and sn != "table":
             continue
 
+        # ── Table ──
+        if sn == "table":
+            td = s.get("table", {})
+            if td:
+                _make_docx_table(doc, td, table_font)
+            continue
+
+        # ── Body text styles ──
         if sn == "bullet":
             _make_docx_bullet(doc, body, body_font)
         elif sn == "numbered":
             _make_docx_numbered(doc, body, body_font)
         else:
-            _make_docx_body_paragraph(doc, body, body_font)
+            _make_docx_rich_paragraph(doc, body, body_font)
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -427,6 +611,8 @@ def generate_pdf(
     sections: list[dict] = [],
     title_font: str = "",
     heading_font: str = "",
+    header_text: str = "",
+    footer_text: str = "",
     sections_json_b64: str = "",
     sections_b64gz: str = "",
     sections_file: str = "",
@@ -438,16 +624,23 @@ def generate_pdf(
         title: Document title.
         title_font: Font for the main title (default: Hei/SimHei).
         heading_font: Default font for all section headings.
+        header_text: Optional page header text.
+        footer_text: Optional page footer text (appended before page number).
         sections: List of section dicts (ASCII-safe only, for short content).
         sections_file: Path to a JSON file on disk containing the sections array.
                       BEST for CJK/large content — avoids MCP argument serialization bugs.
         sections_json_b64: Base64-encoded JSON of sections array (legacy).
         sections_b64gz: gzip-compressed + base64-encoded sections JSON (legacy).
         sections[].heading: Section heading.
-        sections[].body: Section body text.
+        sections[].body: Section body text. **bold** / *italic* markers are stripped in PDF.
         sections[].font: Font for body text in this section.
             Use list_fonts() to see available fonts. Aliases like "kai", "fang", "hei" work.
         sections[].heading_font: Font for this section's heading.
+        sections[].style: "normal" (default), "table", "divider", "image", "bullet", "numbered".
+        sections[].level: Heading level 1/2/3 (default: 1).
+        sections[].table: {"headers": [...], "rows": [[...], ...]} for table style.
+        sections[].image: Path to an image file (local) for image style.
+        sections[].image_width: Image width in mm (optional).
     """
     sections = _decode_sections(sections, sections_json_b64, sections_b64gz, sections_file)
 
@@ -455,7 +648,7 @@ def generate_pdf(
     tfont = _resolve_font(title_font) or global_heading
     default_body = _DEFAULT_BODY_NAME
 
-    pdf = _PDF()
+    pdf = _PDF(header_text=header_text, footer_text=footer_text)
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=20)
     pdf.add_page()
@@ -467,16 +660,63 @@ def generate_pdf(
     for s in sections:
         heading = s.get("heading", "")
         body = s.get("body", "")
+        sn = s.get("style", "normal")
+        level = s.get("level", 1)
 
         body_font = _resolve_font(s.get("font")) or default_body
         sec_heading_font = _resolve_font(s.get("heading_font")) or global_heading
+        table_font = _resolve_font(s.get("table_font")) or body_font
 
-        if heading:
-            _pdf_write_text(pdf, heading, sec_heading_font, 14)
-            pdf.ln(2)
-        if not body:
+        # ── Divider ──
+        if sn == "divider":
+            y = pdf.get_y()
+            bw = pdf.w - pdf.l_margin - pdf.r_margin
+            pdf.line(pdf.l_margin, y, pdf.l_margin + bw, y)
+            pdf.ln(4)
             continue
-        _pdf_write_text(pdf, body, body_font, 11)
+
+        # ── Image ──
+        if sn == "image":
+            img_path = s.get("image", "")
+            if img_path and Path(img_path).exists():
+                w = s.get("image_width")
+                max_w = pdf.w - pdf.l_margin - pdf.r_margin
+                if w is None:
+                    w = max_w
+                x = pdf.l_margin + (max_w - w) / 2
+                pdf.image(img_path, x=x, w=w)
+                pdf.ln(4)
+            continue
+
+        # ── Heading with level ──
+        if heading:
+            sizes = {1: 14, 2: 12, 3: 11}
+            _pdf_write_text(pdf, heading, sec_heading_font, sizes.get(level, 14))
+            pdf.ln(2)
+
+        if not body and sn != "table":
+            continue
+
+        # ── Table ──
+        if sn == "table":
+            td = s.get("table", {})
+            if td:
+                _pdf_write_table(pdf, td, table_font)
+            continue
+
+        # ── Body: strip markdown markers for PDF (no bold/italic in CJK fonts) ──
+        clean_body = _MD_PAT.sub(lambda m: m.group(2) or m.group(3), body)
+
+        if sn == "bullet":
+            for line in clean_body.strip().split("\n"):
+                if line.strip():
+                    _pdf_write_text(pdf, "  • " + line.strip(), body_font, 11)
+        elif sn == "numbered":
+            for i, line in enumerate(clean_body.strip().split("\n"), 1):
+                if line.strip():
+                    _pdf_write_text(pdf, f"  {i}. {line.strip()}", body_font, 11)
+        else:
+            _pdf_write_text(pdf, clean_body, body_font, 11)
 
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
         tmppath = Path(f.name)
