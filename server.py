@@ -14,6 +14,7 @@ import base64
 import gzip
 import json
 import tempfile
+import urllib.request
 from pathlib import Path
 
 from docx import Document
@@ -286,6 +287,29 @@ def _make_docx_rich_paragraph(doc, body: str, font_name: str):
 
 # ── Table ──
 
+def _download_image(url: str) -> Path | None:
+    """Download an image from a URL to a temp file. Returns path or None on failure."""
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = resp.read()
+        suffix = Path(url).suffix or ".png"
+        if suffix.lower() not in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"):
+            suffix = ".png"
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp.write(data)
+        tmp.close()
+        path = Path(tmp.name)
+        print(f"[docgen] downloaded {url[:80]} -> {path.stat().st_size} bytes", flush=True)
+        return path
+    except Exception as e:
+        print(f"[docgen] image download failed: {url[:80]} — {e}", flush=True)
+        return None
+
+
 def _make_docx_table(doc, table_def: dict, font_name: str):
     """Add a styled table with CJK font support."""
     headers = table_def.get("headers", [])
@@ -507,6 +531,7 @@ def generate_docx(
         sections[].heading_font: Font for this section's heading (default: 黑体/SimHei).
         sections[].table: {"headers": [...], "rows": [[...], ...]} for table style.
         sections[].image: Path to an image file (local) for image style.
+        sections[].image_url: URL to an image (auto-downloaded) for image style.
         sections[].image_width: Image width in mm (optional, for image style).
     """
     sections = _decode_sections(sections, sections_json_b64, sections_b64gz, sections_file)
@@ -564,7 +589,12 @@ def generate_docx(
 
         # ── Image ──
         if sn == "image":
+            img_url = s.get("image_url", "")
             img_path = s.get("image", "")
+            if img_url:
+                dl = _download_image(img_url)
+                if dl:
+                    img_path = str(dl)
             if img_path and Path(img_path).exists():
                 w = s.get("image_width")
                 kw = {"width": Inches(w / 25.4)} if w else {}
@@ -640,6 +670,7 @@ def generate_pdf(
         sections[].level: Heading level 1/2/3 (default: 1).
         sections[].table: {"headers": [...], "rows": [[...], ...]} for table style.
         sections[].image: Path to an image file (local) for image style.
+        sections[].image_url: URL to an image (auto-downloaded) for image style.
         sections[].image_width: Image width in mm (optional).
     """
     sections = _decode_sections(sections, sections_json_b64, sections_b64gz, sections_file)
@@ -677,7 +708,12 @@ def generate_pdf(
 
         # ── Image ──
         if sn == "image":
+            img_url = s.get("image_url", "")
             img_path = s.get("image", "")
+            if img_url:
+                dl = _download_image(img_url)
+                if dl:
+                    img_path = str(dl)
             if img_path and Path(img_path).exists():
                 w = s.get("image_width")
                 max_w = pdf.w - pdf.l_margin - pdf.r_margin
