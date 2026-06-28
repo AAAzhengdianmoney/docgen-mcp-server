@@ -93,20 +93,26 @@ def generate_docx(
     sections: list[dict] = [],
     sections_json_b64: str = "",
     sections_b64gz: str = "",
+    sections_file: str = "",
 ) -> str:
     """Generate a Word (.docx) document with title and sections.
 
     Parameters:
         output_path: Absolute path to save the .docx file.
         title: Document title (centered, large heading).
-        sections: List of section dicts (ASCII-safe only).
+        sections: List of section dicts (ASCII-safe only, for short content).
+        sections_file: Path to a JSON file on disk containing the sections array.
+                      Best for CJK/large content — avoids MCP argument serialization bugs.
         sections_json_b64: Base64-encoded JSON of sections array (legacy).
-        sections_b64gz: gzip-compressed + base64-encoded sections JSON. Best for CJK — compresses 50-70%.
+        sections_b64gz: gzip-compressed + base64-encoded sections JSON (legacy).
         sections[].heading: Section heading.
         sections[].body: Section body text.
         sections[].style: "normal" (default), "bullet", or "numbered".
     """
-    sections = _decode_sections(sections, sections_json_b64, sections_b64gz)
+    if sections_file:
+        sections = json.loads(Path(sections_file).read_text(encoding="utf-8"))
+    else:
+        sections = _decode_sections(sections, sections_json_b64, sections_b64gz)
     doc = Document()
     doc.styles["Normal"].font.name = "Arial"
     doc.styles["Normal"].font.size = Pt(11)
@@ -154,19 +160,25 @@ def generate_pdf(
     sections: list[dict] = [],
     sections_json_b64: str = "",
     sections_b64gz: str = "",
+    sections_file: str = "",
 ) -> str:
     """Generate a PDF document with title and sections.
 
     Parameters:
         output_path: Absolute path to save the .pdf file.
         title: Document title.
-        sections: List of section dicts (ASCII-safe only).
+        sections: List of section dicts (ASCII-safe only, for short content).
+        sections_file: Path to a JSON file on disk containing the sections array.
+                      Best for CJK/large content — avoids MCP argument serialization bugs.
         sections_json_b64: Base64-encoded JSON of sections array (legacy).
-        sections_b64gz: gzip-compressed + base64-encoded sections JSON. Best for CJK — compresses 50-70%.
+        sections_b64gz: gzip-compressed + base64-encoded sections JSON (legacy).
         sections[].heading: Section heading.
         sections[].body: Section body text.
     """
-    sections = _decode_sections(sections, sections_json_b64, sections_b64gz)
+    if sections_file:
+        sections = json.loads(Path(sections_file).read_text(encoding="utf-8"))
+    else:
+        sections = _decode_sections(sections, sections_json_b64, sections_b64gz)
     pdf = _PDF()
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=20)
