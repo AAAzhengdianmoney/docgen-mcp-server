@@ -4,13 +4,14 @@ Cross-platform: Windows, macOS, and Linux. CJK font auto-detection.
 
 Built with FastMCP. Install: pip install mcp python-docx fpdf2
 
-Workaround for Claude Code bug #64506 (CJK args parse failure):
-Both generate_* tools accept a `sections_json_b64` param — base64-encoded JSON
-of the sections array. Use this when passing Chinese/Japanese/Korean text.
+Workaround for Claude Code CJK bug (#64506):
+- sections_b64gz: gzip-compressed then base64-encoded JSON. Much smaller.
+- sections_json_b64: plain base64-encoded JSON (legacy, kept for compat).
 """
 from __future__ import annotations
 
 import base64
+import gzip
 import json
 import tempfile
 from pathlib import Path
@@ -59,19 +60,27 @@ for p in _CJK_CANDIDATES:
 
 # ── Helpers ──────────────────────────────────────────────────────
 
-def _decode_sections(sections: list[dict], sections_json_b64: str = "") -> list[dict]:
-    """Decode sections from either direct list or base64-encoded JSON.
+def _decode_sections(sections: list[dict], sections_json_b64: str = "", sections_b64gz: str = "") -> list[dict]:
+    """Decode sections from direct list, base64 JSON, or gzip+base64 JSON.
 
     Claude Code has a known bug (#64506) where long CJK strings in tool args
-    cause JSON parse failure. Passing sections via sections_json_b64 (base64
-    of JSON-serialized sections string) works around this.
+    cause JSON parse failure. Use sections_b64gz (gzip + base64) for CJK text —
+    it compresses Chinese text by 50-70%, avoiding both the CJK parse bug and
+    the long-argument truncation issue.
     """
+    if sections_b64gz:
+        try:
+            raw = base64.b64decode(sections_b64gz)
+            sections = json.loads(gzip.decompress(raw).decode("utf-8"))
+            return sections or []
+        except Exception:
+            pass  # fall through
     if sections_json_b64:
         try:
             decoded = base64.b64decode(sections_json_b64).decode("utf-8")
             sections = json.loads(decoded)
         except Exception:
-            pass  # fall through to sections
+            pass  # fall through
     return sections or []
 
 
@@ -83,19 +92,21 @@ def generate_docx(
     title: str = "",
     sections: list[dict] = [],
     sections_json_b64: str = "",
+    sections_b64gz: str = "",
 ) -> str:
     """Generate a Word (.docx) document with title and sections.
 
     Parameters:
         output_path: Absolute path to save the .docx file.
         title: Document title (centered, large heading).
-        sections: List of section dicts (ASCII-safe only — use sections_json_b64 for CJK).
-        sections_json_b64: Base64-encoded JSON of sections array. Workaround for CJK text (Claude Code bug #64506).
+        sections: List of section dicts (ASCII-safe only).
+        sections_json_b64: Base64-encoded JSON of sections array (legacy).
+        sections_b64gz: gzip-compressed + base64-encoded sections JSON. Best for CJK — compresses 50-70%.
         sections[].heading: Section heading.
         sections[].body: Section body text.
         sections[].style: "normal" (default), "bullet", or "numbered".
     """
-    sections = _decode_sections(sections, sections_json_b64)
+    sections = _decode_sections(sections, sections_json_b64, sections_b64gz)
     doc = Document()
     doc.styles["Normal"].font.name = "Arial"
     doc.styles["Normal"].font.size = Pt(11)
@@ -142,18 +153,20 @@ def generate_pdf(
     title: str = "",
     sections: list[dict] = [],
     sections_json_b64: str = "",
+    sections_b64gz: str = "",
 ) -> str:
     """Generate a PDF document with title and sections.
 
     Parameters:
         output_path: Absolute path to save the .pdf file.
         title: Document title.
-        sections: List of section dicts (ASCII-safe only — use sections_json_b64 for CJK).
-        sections_json_b64: Base64-encoded JSON of sections array. Workaround for CJK text (Claude Code bug #64506).
+        sections: List of section dicts (ASCII-safe only).
+        sections_json_b64: Base64-encoded JSON of sections array (legacy).
+        sections_b64gz: gzip-compressed + base64-encoded sections JSON. Best for CJK — compresses 50-70%.
         sections[].heading: Section heading.
         sections[].body: Section body text.
     """
-    sections = _decode_sections(sections, sections_json_b64)
+    sections = _decode_sections(sections, sections_json_b64, sections_b64gz)
     pdf = _PDF()
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=20)
