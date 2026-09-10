@@ -230,21 +230,70 @@ def _make_docx_body_paragraph(doc, body: str, font_name: str):
 
 
 def _make_docx_bullet(doc, body: str, font_name: str):
-    """Add bullet items with a specific font."""
+    """Add bullet items with a specific font, honouring **bold** / *italic*."""
     for line in body.strip().split("\n"):
-        if line.strip():
-            p = doc.add_paragraph(line.strip(), style="List Bullet")
-            for run in p.runs:
-                _set_run_font(run, font_name)
+        if not line.strip():
+            continue
+        p = doc.add_paragraph(style="List Bullet")
+        for span in _parse_markdown_spans(line.strip()):
+            run = p.add_run(span["text"])
+            run.bold = span["bold"]
+            if span["italic"]:
+                run.underline = True
+            _set_run_font(run, font_name)
 
 
 def _make_docx_numbered(doc, body: str, font_name: str):
-    """Add numbered items with a specific font."""
+    """Add numbered items with a specific font, honouring **bold** / *italic*."""
     for line in body.strip().split("\n"):
-        if line.strip():
-            p = doc.add_paragraph(line.strip(), style="List Number")
-            for run in p.runs:
-                _set_run_font(run, font_name)
+        if not line.strip():
+            continue
+        p = doc.add_paragraph(style="List Number")
+        for span in _parse_markdown_spans(line.strip()):
+            run = p.add_run(span["text"])
+            run.bold = span["bold"]
+            if span["italic"]:
+                run.underline = True
+            _set_run_font(run, font_name)
+
+
+def _set_code_run_font(run, ascii_font: str, cjk_font: str):
+    """ascii font for the mono grid, fixed-pitch CJK for labels (CJK = 2x ASCII width)."""
+    from docx.oxml.ns import qn
+    from lxml import etree
+
+    rpr = run._r.get_or_add_rPr()
+    rFonts = rpr.find(qn("w:rFonts"))
+    if rFonts is None:
+        rFonts = etree.SubElement(rpr, qn("w:rFonts"))
+    rFonts.set(qn("w:ascii"), ascii_font)
+    rFonts.set(qn("w:hAnsi"), ascii_font)
+    rFonts.set(qn("w:eastAsia"), cjk_font)
+
+
+def _make_docx_code(doc, body: str, font_name: str):
+    """Add a monospace block that PRESERVES leading whitespace + line breaks.
+
+    Used for ASCII diagrams / shell snippets where indentation is meaningful.
+    Rendered as ONE paragraph with line breaks so column alignment survives.
+    CJK is rendered in a fixed-pitch font so it occupies exactly 2 ASCII cols,
+    keeping box-drawing borders aligned.
+    """
+    p = doc.add_paragraph()
+    pf = p.paragraph_format
+    pf.space_before = Pt(2)
+    pf.space_after = Pt(8)
+    pf.line_spacing = 1.0
+    lines = body.rstrip("\n").split("\n")
+    for i, line in enumerate(lines):
+        if i:
+            br = p.add_run()
+            _set_code_run_font(br, font_name, "新宋体")
+            br.add_break()
+        run = p.add_run(line)
+        run.font.size = Pt(8)
+        _set_code_run_font(run, font_name, "新宋体")
+    return p
 
 
 # ── Rich text (markdown-like inline formatting) ──
@@ -522,7 +571,7 @@ def generate_docx(
         sections_b64gz: gzip-compressed + base64-encoded sections JSON (legacy).
         sections[].heading: Section heading.
         sections[].body: Section body text. Supports **bold** and *italic* inline.
-        sections[].style: "normal" (default), "bullet", "numbered", "table", "divider", "image".
+        sections[].style: "normal" (default), "bullet", "numbered", "table", "divider", "image", "code".
         sections[].level: Heading level 1/2/3 (default: 1).
         sections[].font: Font for body text in this section (default: 微软雅黑/MS YaHei).
             Use list_fonts() to see available fonts. Aliases like "kai", "fang", "hei" work.
@@ -531,6 +580,10 @@ def generate_docx(
         sections[].image: Path to an image file (local) for image style.
         sections[].image_url: URL to an image (auto-downloaded) for image style.
         sections[].image_width: Image width in mm (optional, for image style).
+        sections[].code_font: Monospace ASCII font for "code" style (default: Consolas).
+            "code" preserves leading whitespace + line breaks (ASCII diagrams, shell);
+            CJK in it renders in a fixed-pitch font so columns stay aligned.
+        Note: "bullet"/"numbered" bodies honour **bold** and *italic* (italic → underline for CJK).
     """
     sections = _decode_sections(sections, sections_json_b64, sections_b64gz, sections_file)
 
@@ -616,6 +669,12 @@ def generate_docx(
             td = s.get("table", {})
             if td:
                 _make_docx_table(doc, td, table_font)
+            continue
+
+        # ── Mono block (ASCII diagram / shell) ──
+        if sn == "code":
+            if body:
+                _make_docx_code(doc, body, _resolve_font(s.get("code_font")) or "Consolas")
             continue
 
         # ── Body text styles ──
